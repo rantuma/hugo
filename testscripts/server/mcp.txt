@@ -1,0 +1,40 @@
+# Test the hugo mcp command with the Streamable HTTP transport.
+
+# We run these tests in parallel so let Hugo decide which port to use.
+hugo mcp --http 127.0.0.1:0 --watch &
+
+waitServer
+
+mcpcall search_docs '{"query":"strings.Replace"}' '"url":"https://example.org/functions/replace/"' '"heading":"Examples"'
+mcpcall get_page '{"path":"/functions/replace/#examples"}' '## Examples \{#examples\}' 'strings.Replace "Batman and Robin"'
+mcpcall get_toc '{}' '"title":"Functions"' '"url":"https://example.org/functions/"'
+mcpcall get_page '{"path":"/nope/"}' '^error: no page found for "/nope/"'
+mcpcall search_docs '{"query":"Catwoman"}' 'No matches'
+
+replace content/functions/replace.md 'Joker' 'Catwoman'
+mcpcall search_docs '{"query":"Catwoman"}' '"url":"https://example.org/functions/replace/#examples"'
+
+stopServer
+wait
+stderr 'MCP server is available at http://127.0.0.1:\d+/mcp'
+stderr 'Built and indexed in \d+ ms'
+! stderr 'ERROR|WARN'
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+title = "Docs"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- content/functions/_index.md --
+---
+title: Functions
+---
+-- content/functions/replace.md --
+---
+title: strings.Replace
+description: Replaces all occurrences of OLD with NEW.
+---
+## Examples
+
+```go-html-template
+{{ strings.Replace "Batman and Robin" "Robin" "Joker" }}
+```

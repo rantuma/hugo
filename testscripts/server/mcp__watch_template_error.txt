@@ -1,0 +1,27 @@
+# Test that hugo mcp --watch keeps serving when the sites cannot be created, e.g. because of a template error, and recovers when it's fixed.
+
+hugo mcp --http 127.0.0.1:0 --watch &
+
+waitServer
+
+mcpcall search_docs '{"query":"intro"}' '^error: the site failed to build: .*missing value for if'
+
+replace layouts/page.html '{{ if }}' '{{ end }}'
+mcpcall search_docs '{"query":"intro"}' '^error: the site failed to build: .*unexpected \{\{end\}\}'
+
+replace layouts/page.html '{{ end }}' '{{ .Content }}'
+mcpcall search_docs '{"query":"intro"}' '"url":"https://example.org/p1/"'
+
+stopServer
+wait
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- layouts/page.html --
+{{ if }}
+-- content/p1.md --
+---
+title: P1
+---
+The intro.

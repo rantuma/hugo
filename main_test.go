@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -37,6 +39,7 @@ import (
 	"github.com/gohugoio/hugo/common/hugio"
 	"github.com/gohugoio/hugo/htesting"
 	"github.com/gohugoio/hugo/hugofs"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -351,6 +354,84 @@ var commonTestScriptsParam = testscript.Params{
 				if time.Since(start) > 6*time.Second {
 					ts.Fatalf("timeout waiting for %q: %v", args[0], err)
 				}
+			}
+		},
+		// mcpcall calls a tool on the server started with hugo mcp --http, or with -stdio on a new hugo mcp process,
+		// and checks that the text output matches (if it compiles as a regexp) or contains all of the strings given as arguments.
+		// The output of a tool error starts with "error: ".
+		"mcpcall": func(ts *testscript.TestScript, neg bool, args []string) {
+			stdio := len(args) > 0 && args[0] == "-stdio"
+			if stdio {
+				args = args[1:]
+			}
+			if len(args) < 3 {
+				ts.Fatalf("usage: mcpcall [-stdio] TOOL JSON STRING...")
+			}
+			var arguments map[string]any
+			if err := json.Unmarshal([]byte(args[1]), &arguments); err != nil {
+				ts.Fatalf("invalid arguments: %v", err)
+			}
+			var transport mcp.Transport = &mcp.StreamableClientTransport{Endpoint: ts.Getenv("HUGOTEST_BASEURL_0") + "mcp"}
+			if stdio {
+				cmd := exec.Command("hugo", "mcp")
+				cmd.Dir = ts.MkAbs(".")
+				cmd.Env = os.Environ()
+				for _, k := range []string{"HOME", "HUGO_TESTRUN", "HUGO_CACHEDIR", "XDG_CACHE_HOME"} {
+					cmd.Env = append(cmd.Env, k+"="+ts.Getenv(k))
+				}
+				cmd.Stderr = ts.Stderr()
+				transport = &mcp.CommandTransport{Command: cmd}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cs, err := mcp.NewClient(&mcp.Implementation{Name: "testscript", Version: "v1.0.0"}, nil).Connect(ctx, transport, nil)
+			if err != nil {
+				ts.Fatalf("failed to connect: %v", err)
+			}
+
+			trycall := func() error {
+				res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: args[0], Arguments: arguments})
+				if err != nil {
+					return err
+				}
+				var sb strings.Builder
+				if res.IsError {
+					sb.WriteString("error: ")
+				}
+				for _, c := range res.Content {
+					if tc, ok := c.(*mcp.TextContent); ok {
+						sb.WriteString(tc.Text)
+					}
+				}
+				output := sb.String()
+				for _, s := range args[2:] {
+					var ok bool
+					if re, err := regexp.Compile(s); err == nil {
+						ok = re.MatchString(output)
+					} else {
+						ok = strings.Contains(output, s)
+					}
+					if ok == neg {
+						return fmt.Errorf("output %q of %s: got match %t for %q", output, args[0], ok, s)
+					}
+				}
+				return nil
+			}
+
+			// Retry to allow for rebuilds when watching for changes.
+			start := time.Now()
+			for {
+				err = trycall()
+				if err == nil || time.Since(start) > 6*time.Second {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if err := cs.Close(); err != nil {
+				ts.Fatalf("failed to close: %v", err)
+			}
+			if err != nil {
+				ts.Fatalf("%v", err)
 			}
 		},
 		// checkfile checks that a file exists and is not empty.

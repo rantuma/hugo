@@ -198,8 +198,11 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) (err error)
 
 		// Make sure to write any build stats to disk first so it's available
 		// to the post processors.
-		if err := h.writeBuildStats(); err != nil {
-			return err
+		// Nothing gets rendered with SkipRender, so keep any existing stats.
+		if !conf.SkipRender {
+			if err := h.writeBuildStats(); err != nil {
+				return err
+			}
 		}
 
 		// We need to do this before render deferred.

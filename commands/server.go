@@ -860,8 +860,12 @@ func (c *serverCommand) partialReRender(urls ...string) (err error) {
 		return
 	}
 
-	// Note: We do not set NoBuildLock as the file lock is not acquired at this stage.
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: false, RecentlyTouched: visited, PartialReRender: true, ErrRecovery: c.errState.wasErr()})
+	unlock, err := c.lockBuild(h.LockBuild)
+	if err != nil {
+		return fmt.Errorf("failed to acquire a build lock: %w", err)
+	}
+	defer unlock()
+	err = h.Build(hugolib.BuildCfg{NoBuildLock: true, RecentlyTouched: visited, PartialReRender: true, ErrRecovery: c.errState.wasErr()})
 
 	return
 }

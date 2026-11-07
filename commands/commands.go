@@ -27,6 +27,7 @@ func newExec() (*simplecobra.Exec, error) {
 			newVersionCmd(),
 			newEnvCommand(),
 			newServerCommand(),
+			newMCPCommand(),
 			newDeployCommand(),
 			newConfigCommand(),
 			newNewCommand(),

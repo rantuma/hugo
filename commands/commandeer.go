@@ -448,6 +448,10 @@ func (r *rootCommand) Run(ctx context.Context, cd *simplecobra.Commandeer, args 
 
 func (r *rootCommand) PreRun(cd, runner *simplecobra.Commandeer) error {
 	r.StdOut = os.Stdout
+	if _, ok := runner.Command.(*mcpCommand); ok {
+		// Stdout is reserved for the MCP messages.
+		r.StdOut = os.Stderr
+	}
 	r.StdErr = os.Stderr
 	if r.quiet {
 		r.StdOut = io.Discard
