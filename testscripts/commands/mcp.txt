@@ -1,0 +1,14 @@
+# Test the hugo mcp command with the stdio transport.
+
+# Any output other than the MCP messages on stdout breaks the client.
+mcpcall -stdio search_docs '{"query":"intro"}' '"url":"https://example.org/p1/"'
+mcpcall -stdio get_page '{"path":"p1.md"}' 'title: P1' 'The intro\.'
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- content/p1.md --
+---
+title: P1
+---
+The intro.

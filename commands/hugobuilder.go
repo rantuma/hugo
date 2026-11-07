@@ -48,6 +48,7 @@ import (
 	"github.com/gohugoio/hugo/internal/warpc"
 	"github.com/gohugoio/hugo/livereload"
 	"github.com/gohugoio/hugo/resources/page"
+	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/watcher"
 	"github.com/spf13/afero"
 	"github.com/spf13/fsync"
@@ -76,6 +77,19 @@ type hugoBuilder struct {
 
 	fastRenderMode     bool
 	showErrorInBrowser bool
+
+	// skipRender builds the sites without rendering them to the publish dir.
+	skipRender bool
+	// onBuildDone, if set, is called after each build attempt of the sites.
+	// It receives the build error, if any, and returns the error to use for the build.
+	// If err is nil, the build lock is held; otherwise, h may be nil.
+	onBuildDone func(h *hugolib.HugoSites, err error) error
+	// fullBuildFailed is set when the last full build failed,
+	// which leaves nothing to do a partial rebuild from.
+	fullBuildFailed atomic.Bool
+
+	// buildMu serializes the builds in this process, see lockBuild.
+	buildMu sync.Mutex
 
 	errState hugoBuilderErrState
 }
@@ -231,7 +245,7 @@ func (c *hugoBuilder) initMemTicker() func() {
 	printMem := func() {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		fmt.Printf("\n\nAlloc = %v\nTotalAlloc = %v\nSys = %v\nNumGC = %v\n\n", formatByteCount(m.Alloc), formatByteCount(m.TotalAlloc), formatByteCount(m.Sys), m.NumGC)
+		fmt.Fprintf(c.r.StdOut, "\n\nAlloc = %v\nTotalAlloc = %v\nSys = %v\nNumGC = %v\n\n", formatByteCount(m.Alloc), formatByteCount(m.TotalAlloc), formatByteCount(m.Sys), m.NumGC)
 	}
 
 	go func() {
@@ -333,6 +347,16 @@ func (c *hugoBuilder) initTraceProfile() (func(), error) {
 
 // newWatcher creates a new watcher to watch filesystem events.
 func (c *hugoBuilder) newWatcher(pollIntervalStr string, dirList ...string) (*watcher.Batcher, error) {
+	h, err := c.hugo()
+	if err != nil {
+		return nil, err
+	}
+	return c.newSourceWatcher(h.Deps.SourceSpec, pollIntervalStr, dirList...)
+}
+
+// newSourceWatcher creates a new watcher to watch filesystem events in dirList,
+// using spec to skip the ignored dirs and to lock the build.
+func (c *hugoBuilder) newSourceWatcher(spec *source.SourceSpec, pollIntervalStr string, dirList ...string) (*watcher.Batcher, error) {
 	staticSyncer := &staticSyncer{c: c}
 
 	var pollInterval time.Duration
@@ -353,12 +377,6 @@ func (c *hugoBuilder) newWatcher(pollIntervalStr string, dirList ...string) (*wa
 	if err != nil {
 		return nil, err
 	}
-
-	h, err := c.hugo()
-	if err != nil {
-		return nil, err
-	}
-	spec := h.Deps.SourceSpec
 
 	for _, d := range dirList {
 		if d != "" {
@@ -386,7 +404,7 @@ func (c *hugoBuilder) newWatcher(pollIntervalStr string, dirList ...string) (*wa
 		for {
 			select {
 			case changes := <-c.r.changesFromBuild:
-				unlock, err := h.LockBuild()
+				unlock, err := c.lockBuild(spec.LockBuild)
 				if err != nil {
 					c.r.logger.Errorf("Failed to acquire a build lock: %s", err)
 					return
@@ -406,17 +424,22 @@ func (c *hugoBuilder) newWatcher(pollIntervalStr string, dirList ...string) (*wa
 				unlock()
 
 			case evs := <-watcher.Events:
-				unlock, err := h.LockBuild()
+				unlock, err := c.lockBuild(spec.LockBuild)
 				if err != nil {
 					c.r.logger.Errorf("Failed to acquire a build lock: %s", err)
 					return
 				}
-				c.handleEvents(watcher, staticSyncer, evs, configSet)
-				if c.showErrorInBrowser && c.errState.buildErr() != nil {
+				fullRebuild := c.handleEvents(watcher, staticSyncer, evs, configSet)
+				// A full rebuild reloads the browser when done.
+				if fullRebuild == nil && c.showErrorInBrowser && c.errState.buildErr() != nil {
 					// Need to reload browser to show the error
 					livereload.ForceRefresh()
 				}
 				unlock()
+				if fullRebuild != nil {
+					// This may wait for a running full rebuild, which needs the build lock.
+					fullRebuild()
+				}
 			case err := <-watcher.Errors():
 				if err != nil && !herrors.IsNotExist(err) {
 					c.r.logger.Errorln("Error while watching:", err)
@@ -459,17 +482,50 @@ func (c *hugoBuilder) build() error {
 }
 
 func (c *hugoBuilder) buildSites(noBuildLock bool) (err error) {
+	var unlock func()
 	defer func() {
 		c.errState.setBuildErr(err)
+		// The watcher reads this while holding the build lock.
+		c.fullBuildFailed.Store(err != nil)
+		if unlock != nil {
+			unlock()
+		}
 	}()
 
 	var h *hugolib.HugoSites
 	h, err = c.hugo()
 	if err != nil {
-		return
+		return c.buildDone(nil, err)
 	}
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: noBuildLock})
-	return
+	if !noBuildLock {
+		if unlock, err = c.lockBuild(h.LockBuild); err != nil {
+			return c.buildDone(h, fmt.Errorf("failed to acquire a build lock: %w", err))
+		}
+	}
+	return c.buildDone(h, h.Build(hugolib.BuildCfg{NoBuildLock: true, SkipRender: c.skipRender}))
+}
+
+// lockBuild acquires the build lock with lock while holding buildMu.
+// Each HugoSites has its own lock, which, with noBuildLock, isn't shared between instances,
+// and a config reload replaces the HugoSites while the watcher may hold the lock of the old one.
+func (c *hugoBuilder) lockBuild(lock func() (func(), error)) (func(), error) {
+	c.buildMu.Lock()
+	unlock, err := lock()
+	if err != nil {
+		c.buildMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		unlock()
+		c.buildMu.Unlock()
+	}, nil
+}
+
+func (c *hugoBuilder) buildDone(h *hugolib.HugoSites, err error) error {
+	if c.onBuildDone == nil {
+		return err
+	}
+	return c.onBuildDone(h, err)
 }
 
 func (c *hugoBuilder) copyStatic() (map[string]uint64, error) {
@@ -728,8 +784,8 @@ func (c *hugoBuilder) fullRebuild(changeType string) {
 		if err != nil {
 			// Set the processing on pause until the state is recovered.
 			c.errState.setPaused(true)
-			c.handleBuildErr(err, "Failed to reload config")
-			if c.s.doLiveReload {
+			c.handleBuildErr(c.buildDone(nil, err), "Failed to reload config")
+			if c.s != nil && c.s.doLiveReload {
 				livereload.ForceRefresh()
 			}
 		} else {
@@ -737,16 +793,18 @@ func (c *hugoBuilder) fullRebuild(changeType string) {
 		}
 
 		if !c.errState.isPaused() {
-			_, err := c.copyStatic()
-			if err != nil {
-				c.r.logger.Errorln(err)
-				return
+			if !c.skipRender {
+				if _, err := c.copyStatic(); err != nil {
+					c.r.logger.Errorln(err)
+					return
+				}
 			}
 			err = c.buildSites(false)
 			c.recoverIfBroken(err)
 			if err != nil {
 				c.r.logger.Errorln(err)
-			} else if c.s != nil && c.s.doLiveReload {
+			}
+			if c.s != nil && c.s.doLiveReload && (err == nil || c.showErrorInBrowser) {
 				livereload.ForceRefresh()
 			}
 		}
@@ -770,11 +828,13 @@ func (c *hugoBuilder) handleBuildErr(err error, msg string) {
 	c.r.logger.Errorln(msg + ": " + cleanErrorLog(err.Error()))
 }
 
+// handleEvents handles the file system events while holding the build lock.
+// It returns the full rebuild to run, if needed, after the lock is released.
 func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 	staticSyncer *staticSyncer,
 	evs []fsnotify.Event,
 	configSet map[string]bool,
-) {
+) (fullRebuild func()) {
 	defer func() {
 		c.errState.setWasErr(false)
 	}()
@@ -853,9 +913,7 @@ func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 			}
 
 			// Config file(s) changed. Need full rebuild.
-			c.fullRebuild(configChangeType)
-
-			return
+			return func() { c.fullRebuild(configChangeType) }
 		}
 	}
 
@@ -899,7 +957,7 @@ func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 
 	h, err := c.hugo()
 	if err != nil {
-		c.r.logger.Errorln("Error getting the Hugo object:", err)
+		c.r.logger.Errorln("Error getting the Hugo object:", c.buildDone(nil, err))
 		return
 	}
 	n = 0
@@ -979,7 +1037,7 @@ func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 	staticEvents = filterDuplicateEvents(staticEvents)
 	dynamicEvents = filterDuplicateEvents(dynamicEvents)
 
-	if len(staticEvents) > 0 {
+	if len(staticEvents) > 0 && !c.skipRender {
 		c.printChangeDetected("Static files")
 
 		if c.r.forceSyncStatic {
@@ -1016,6 +1074,10 @@ func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 				livereload.ForceRefresh()
 			}
 		}
+	}
+
+	if len(dynamicEvents) > 0 && c.fullBuildFailed.Load() {
+		return func() { c.fullRebuild("") }
 	}
 
 	if len(dynamicEvents) > 0 {
@@ -1116,6 +1178,7 @@ func (c *hugoBuilder) handleEvents(watcher *watcher.Batcher,
 			}
 		}
 	}
+	return nil
 }
 
 func (c *hugoBuilder) postBuild(what string, start time.Time) {
@@ -1228,9 +1291,9 @@ func (c *hugoBuilder) rebuildSites(events []fsnotify.Event) (err error) {
 	var h *hugolib.HugoSites
 	h, err = c.hugo()
 	if err != nil {
-		return
+		return c.buildDone(nil, err)
 	}
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: true, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()}, events...)
+	err = c.buildDone(h, h.Build(hugolib.BuildCfg{NoBuildLock: true, SkipRender: c.skipRender, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()}, events...))
 	return
 }
 
@@ -1243,11 +1306,11 @@ func (c *hugoBuilder) rebuildSitesForChanges(ids []identity.Identity) (err error
 	var h *hugolib.HugoSites
 	h, err = c.hugo()
 	if err != nil {
-		return
+		return c.buildDone(nil, err)
 	}
 	whatChanged := &hugolib.WhatChanged{}
 	whatChanged.Add(ids...)
-	err = h.Build(hugolib.BuildCfg{NoBuildLock: true, WhatChanged: whatChanged, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()})
+	err = c.buildDone(h, h.Build(hugolib.BuildCfg{NoBuildLock: true, SkipRender: c.skipRender, WhatChanged: whatChanged, RecentlyTouched: c.visitedURLs, ErrRecovery: c.errState.wasErr()}))
 
 	return
 }

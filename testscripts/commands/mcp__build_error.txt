@@ -1,0 +1,14 @@
+# Test that the hugo mcp command returns the error when the sites cannot be created.
+
+mcpcall -stdio search_docs '{"query":"intro"}' '^error: the site failed to build: .*parse of template failed'
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- layouts/page.html --
+{{ if }}
+-- content/p1.md --
+---
+title: P1
+---
+The intro.

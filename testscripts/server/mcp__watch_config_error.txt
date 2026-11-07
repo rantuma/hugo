@@ -1,0 +1,28 @@
+# Test that hugo mcp --watch warns that the content may be outdated while the config fails to load.
+
+hugo mcp --http 127.0.0.1:0 --watch &
+
+waitServer
+
+mcpcall search_docs '{"query":"intro"}' '"url":"https://example.org/p1/"'
+! mcpcall search_docs '{"query":"intro"}' 'warning'
+
+replace hugo.toml 'baseURL = "https://example.org/"' 'baseURL = "https://example.org/'
+mcpcall search_docs '{"query":"intro"}' '"url":"https://example.org/p1/"' '"warning":"The last build failed, so the content may be outdated: '
+
+replace content/p1.md 'The intro.' 'The changed intro.'
+replace hugo.toml 'baseURL = "https://example.org/' 'baseURL = "https://example.org/"'
+mcpcall search_docs '{"query":"changed"}' '"url":"https://example.org/p1/"'
+! mcpcall search_docs '{"query":"intro"}' 'warning'
+
+stopServer
+wait
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- content/p1.md --
+---
+title: P1
+---
+The intro.

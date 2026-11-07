@@ -1,0 +1,37 @@
+# Test that the hugo server command recovers when the full rebuild after a config change fails,
+# with full rebuilds on later changes until one succeeds.
+
+hugo server &
+
+waitServer
+
+httpget ${HUGOTEST_BASEURL_0}p1/ 'Title: P1\|Foo: FOO\|'
+
+replace $WORK/hugo.toml 'foo = "foo"' 'foo = ["foo"]'
+httpget ${HUGOTEST_BASEURL_0}p1/ 'Hugo Server: Error' 'upper'
+
+replace $WORK/layouts/page.html 'upper' 'lower'
+httpget ${HUGOTEST_BASEURL_0}p1/ 'Hugo Server: Error' 'lower'
+
+replace $WORK/layouts/page.html 'site.Params.foo | lower' 'index site.Params.foo 0 | upper'
+httpget ${HUGOTEST_BASEURL_0}p1/ 'Title: P1\|Foo: FOO\|'
+
+stopServer
+wait
+stdout 'rebuilding site \(#3\)'
+# No partial rebuilds.
+! stdout 'Total in'
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "sitemap"]
+[params]
+foo = "foo"
+-- layouts/home.html --
+Home.
+-- layouts/page.html --
+Title: {{ .Title }}|Foo: {{ site.Params.foo | upper }}|
+-- content/p1/index.md --
+---
+title: P1
+---

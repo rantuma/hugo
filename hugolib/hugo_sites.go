@@ -728,6 +728,28 @@ func (s *Site) preparePagesForRender(isRenderingSite bool, idx int) error {
 	)
 }
 
+// PrepareForOutputFormat shifts all pages in all sites to the output format with the given name,
+// e.g. to read rendered content and permalinks in that format after a build.
+// The caller must make sure that no build is running.
+func (h *HugoSites) PrepareForOutputFormat(name string) error {
+	idx := -1
+	for i, f := range h.renderFormats {
+		if f.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("output format %q not found", name)
+	}
+	for s := range h.allSites(nil) {
+		if err := s.preparePagesForRender(true, idx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *HugoSites) loadData() error {
 	h.data = make(map[string]any)
 	w := hugofs.NewWalkway(

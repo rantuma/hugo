@@ -583,3 +583,18 @@ enable = false
 	`)
 	b.AssertFileExists("public/hugo_stats.json", false)
 }
+
+func TestBuildStatsNotWrittenWithSkipRender(t *testing.T) {
+	files := `
+-- hugo.toml --
+[build.buildStats]
+enable = true
+-- hugo_stats.json --
+{"htmlElements":{"tags":["div"],"classes":["myclass"],"ids":["myid"]}}
+-- layouts/list.html --
+<div id="otherid" class="otherclass">Foo</div>
+`
+	b := Test(t, files, TestOptOsFs(), TestOptSkipRender())
+
+	b.AssertFileContent("hugo_stats.json", "myclass", "myid")
+}

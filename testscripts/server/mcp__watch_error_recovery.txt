@@ -1,0 +1,36 @@
+# Test that hugo mcp --watch recovers from a failed full build while the files keep changing.
+
+hugo mcp --http 127.0.0.1:0 --watch &
+
+waitServer
+
+mcpcall search_docs '{"query":"recovered"}' '^error: the site failed to build: '
+
+# Each change triggers a full rebuild, which must not wait on the watcher.
+replace content/b.md 'v1' 'v2'
+sleep 1
+replace content/b.md 'v2' 'v3'
+sleep 1
+replace content/b.md 'v3' 'v4'
+sleep 1
+replace content/b.md 'v4' 'v5'
+replace content/a.md 'title: [' 'title: A'
+sleep 2
+mcpcall search_docs '{"query":"recovered"}' '"url":"https://example.org/a/"'
+
+stopServer
+wait
+
+-- hugo.toml --
+baseURL = "https://example.org/"
+disableKinds = ["taxonomy", "term", "rss", "sitemap"]
+-- content/a.md --
+---
+title: [
+---
+Recovered.
+-- content/b.md --
+---
+title: B
+---
+Version v1.

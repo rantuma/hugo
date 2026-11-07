@@ -77,6 +77,7 @@ hugo [flags]
 * [hugo gen](/commands/hugo_gen/)	 - Generate documentation and syntax highlighting styles
 * [hugo import](/commands/hugo_import/)	 - Import a project from another system
 * [hugo list](/commands/hugo_list/)	 - List content
+* [hugo mcp](/commands/hugo_mcp/)	 - Start an MCP server to search and read your project
 * [hugo mod](/commands/hugo_mod/)	 - Manage modules
 * [hugo new](/commands/hugo_new/)	 - Create new content
 * [hugo server](/commands/hugo_server/)	 - Start the embedded web server
